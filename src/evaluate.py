@@ -61,16 +61,21 @@ def plot_confusion_matrix(
     X_test,
     y_test,
     *,
+    threshold: float = 0.35,
     save_path: str | None = None,
     show: bool = True,
 ) -> dict:
     """
     Plot an annotated confusion matrix and return scalar metrics.
 
+    threshold: probability cut-off for predicting Failure (default 0.35).
+               Lowering below 0.5 increases recall at the cost of precision.
+
     Returns:
         {'mcc': float, 'f1': float, 'cm': ndarray, 'report': str}
     """
-    y_pred = model.predict(X_test)
+    proba = model.predict_proba(X_test)[:, 1]
+    y_pred = (proba >= threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred)
     mcc = matthews_corrcoef(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
@@ -88,7 +93,7 @@ def plot_confusion_matrix(
         xticklabels=["Predicted: No Failure", "Predicted: Failure"],
         yticklabels=["Actual: No Failure", "Actual: Failure"],
     )
-    ax.set_title(f"Confusion Matrix — MCC: {mcc:.3f}  F1: {f1:.3f}")
+    ax.set_title(f"Confusion Matrix — MCC: {mcc:.3f}  F1: {f1:.3f}  (threshold={threshold})")
     ax.set_xlabel(
         "Top-right = false alarms (unnecessary inspections)\n"
         "Bottom-left = missed failures (dangerous)"
@@ -98,7 +103,11 @@ def plot_confusion_matrix(
     if save_path:
         fig.savefig(save_path, dpi=150)
     if show:
-        plt.show()
+        import matplotlib
+        if matplotlib.get_backend() != 'agg':
+            plt.show()
+        else:
+            plt.close(fig)
     else:
         plt.close(fig)
 
