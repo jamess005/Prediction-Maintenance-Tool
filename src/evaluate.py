@@ -56,7 +56,9 @@ def plot_confusion_matrix(
         xticklabels=["Predicted: No Failure", "Predicted: Failure"],
         yticklabels=["Actual: No Failure", "Actual: Failure"],
     )
-    ax.set_title(f"Confusion Matrix — MCC: {mcc:.3f}  F1: {f1:.3f}  (threshold={threshold})")
+    ax.set_title(
+        f"Confusion Matrix — MCC: {mcc:.3f}  F1: {f1:.3f}  (threshold={threshold})"
+    )
     plt.tight_layout()
 
     if save_path:
@@ -70,5 +72,11 @@ def plot_confusion_matrix(
     else:
         plt.close(fig)
 
-    return {"mcc": mcc, "f1": f1, "recall": rec, "precision": prec,
-            "cm": cm, "report": report}
+    return {
+        "mcc": float(mcc),
+        "f1": float(f1),
+        "recall": float(rec),
+        "precision": float(prec),
+        "cm": cm,
+        "report": report,
+    }

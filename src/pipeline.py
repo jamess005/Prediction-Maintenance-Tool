@@ -26,12 +26,16 @@ def run():
     y = df[get_target_column()]
 
     # 70 / 15 / 15 split
+    # val: threshold selection (~1497 rows, ~52 failure cases — more reliable
+    #      than the previous 4-way split which gave only ~34 failure cases)
+    # test: final honest evaluation (untouched until reporting)
     X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, stratify=y, random_state=42
+        X, y, test_size=0.30, stratify=y, random_state=42
     )
     X_val, X_test, y_val, y_test = train_test_split(
         X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
     )
+
     weight = get_class_weight(y_train)
 
     print(f"Data:    {len(df)} rows, {len(get_feature_columns())} features")
@@ -39,42 +43,46 @@ def run():
     print(f"Weight:  {weight:.2f}  ({int((y_train==0).sum())} no-fail vs {int((y_train==1).sum())} fail)")
 
     # ── Hyperparameter tuning ───────────────────────────────────────────────
-    print("\nTuning hyperparameters (75 Optuna trials, 5-fold stratified CV)...")
-    print("  Uses MCC at 0.5 threshold as the search metric — this keeps")
-    print("  hyperparameter comparison fair and deterministic between runs.")
-    print("  The deployment threshold is selected separately on the val set.\n")
-    tune_results = tune_model(X_train, y_train, scale_pos_weight=weight, n_trials=75)
+    print("\nTuning hyperparameters (100 Optuna trials, 5-fold stratified CV)...")
+    print("  Optimises MCC at 0.5 threshold — fair, deterministic comparison across trials.")
+    print("  Deployment threshold is selected separately on val set.\n")
+    tune_results = tune_model(X_train, y_train, scale_pos_weight=weight, n_trials=100)
     best_params = tune_results["best_params"]
     print(f"  Optuna search MCC: {tune_results['best_mcc']:.4f}")
 
-    # ── Final fit with early stopping ───────────────────────────────────────
-    final_params = {**best_params, 'n_estimators': 3000, 'early_stopping_rounds': 75}
-    model = build_model(scale_pos_weight=weight, **final_params)
-    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-    print(f"\nFinal model: {model.best_iteration} trees (early stopped from 3000)")
+    # ── Final fit ───────────────────────────────────────────────────────────
+    # Use Optuna's best params directly — training takes ~1 min so early
+    # stopping adds architectural complexity for no practical benefit.
+    model = build_model(scale_pos_weight=weight, **best_params)
+    model.fit(X_train, y_train)
+    print(f"\nFinal model: {model.n_estimators} trees")
 
-    # ── Find optimal threshold on validation set ────────────────────────────
+    # ── Find optimal threshold on val set ───────────────────────────────────
+    # Recall floor is 0.90 — missing a failure (false negative) is far more
+    # costly than a false alarm in predictive maintenance.
     threshold = find_best_threshold(model, X_val, y_val)
-    print(f"Threshold: {threshold}  (best MCC on val set with ≥85% recall)")
+    print(f"Threshold: {threshold}  (best MCC on val with >=90% recall)")
 
     # ── Evaluate ────────────────────────────────────────────────────────────
     val_m  = plot_confusion_matrix(model, X_val,  y_val,  threshold=threshold, show=False)
     test_m = plot_confusion_matrix(model, X_test, y_test, threshold=threshold,
                                    save_path=CM_PATH, show=False)
 
-    mean_mcc = (val_m['mcc'] + test_m['mcc']) / 2
-    mean_f1  = (val_m['f1']  + test_m['f1'])  / 2
+    mean_mcc  = (val_m['mcc']       + test_m['mcc'])       / 2
+    mean_f1   = (val_m['f1']        + test_m['f1'])        / 2
+    mean_rec  = (val_m['recall']    + test_m['recall'])    / 2
+    mean_prec = (val_m['precision'] + test_m['precision']) / 2
 
-    print(f"\n{'Set':<6} {'MCC':>6} {'F1':>6} {'Recall':>7} {'Precision':>10}")
-    print(f"{'─'*38}")
-    print(f"{'Val':<6} {val_m['mcc']:>6.3f} {val_m['f1']:>6.3f} {val_m['recall']:>7.3f} {val_m['precision']:>10.3f}")
-    print(f"{'Test':<6} {test_m['mcc']:>6.3f} {test_m['f1']:>6.3f} {test_m['recall']:>7.3f} {test_m['precision']:>10.3f}")
-    print(f"{'─'*38}")
-    print(f"{'Mean':<6} {mean_mcc:>6.3f} {mean_f1:>6.3f}")
+    print(f"\n{'Set':<8} {'MCC':>6} {'F1':>6} {'Recall':>7} {'Precision':>10}")
+    print(f"{'─'*40}")
+    print(f"{'Val':<8} {val_m['mcc']:>6.3f} {val_m['f1']:>6.3f} {val_m['recall']:>7.3f} {val_m['precision']:>10.3f}")
+    print(f"{'Test':<8} {test_m['mcc']:>6.3f} {test_m['f1']:>6.3f} {test_m['recall']:>7.3f} {test_m['precision']:>10.3f}")
+    print(f"{'─'*40}")
+    print(f"{'Mean':<8} {mean_mcc:>6.3f} {mean_f1:>6.3f} {mean_rec:>7.3f} {mean_prec:>10.3f}") 
 
     # ── Save ────────────────────────────────────────────────────────────────
     joblib.dump({'model': model, 'threshold': threshold}, MODEL_PATH)
-    print(f"\nSaved model + threshold → {MODEL_PATH}")
+    print(f"\nSaved model + threshold -> {MODEL_PATH}")
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 import pandas as pd
 
-# Failure-mode sub-type columns — these are sub-labels of the target and must
-# never appear as model features (direct data leakage).
+# Failure-mode sub-type columns — sub-labels of the target, never model features
+# (direct data leakage).
 _FAILURE_MODE_COLS = ['TWF', 'HDF', 'PWF', 'OSF', 'RNF']
 
 # Raw sensor columns that need bracket-free names for XGBoost compatibility.
@@ -20,55 +20,54 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     Steps
     -----
-    1. Drop rows where RNF=1 — random failures have no learnable pattern and
-       add noise that degrades the model.
+    1. Drop rows where RNF=1 — random failures have no learnable pattern.
+       NOTE: In production the model encounters RNF events without knowing
+       they are random, so live recall may be slightly lower than metrics here.
     2. Rename raw sensor columns (XGBoost rejects square brackets).
-    3. Add three engineered features that combine/transform the raw signals.
-    4. Encode the product quality variant as an ordinal integer.
-    5. Drop failure-mode sub-type columns (TWF/HDF/PWF/OSF/RNF) — these are
-       derived from the target label and would be pure data leakage.
-    6. Drop 'Type' (already encoded as product_type) and any remaining ID cols.
+    3. Add four engineered features.
+    4. Encode product quality variant as ordinal integer.
+    5. Drop failure-mode sub-type columns (data leakage).
+    6. Drop 'Type' and any remaining ID columns.
 
-    Output feature columns (see get_feature_columns for the definitive list):
-        Raw sensors (renamed)
-        ----------------------
-        air_temp_K      : Air temperature [K]
-        proc_temp_K     : Process temperature [K]
-        rot_speed_rpm   : Rotational speed [rpm]
-        torque_Nm       : Torque [Nm]
-        tool_wear_min   : Tool wear [min]
+    Feature notes
+    -------------
+    product_type (L=0, M=1, H=2) has low individual SHAP importance (~0.2)
+    but is retained — removing it reduced Optuna search MCC from 0.808 to
+    0.798, suggesting it contributes marginal signal that aids hyperparameter
+    search even if it rarely drives individual predictions. The ordinal
+    encoding is acceptable since XGBoost treats it as a split threshold
+    rather than a true numeric value.
 
-        Engineered
-        ----------
-        power_W         : torque × RPM / 9550  (actual mechanical load)
-        temp_delta_K    : proc_temp − air_temp  (cooling effectiveness)
-        torque_wear     : torque × tool_wear   (cumulative stress on worn tool)
-        product_type    : L=0, M=1, H=2  (quality variant, ordinal)
+    wear_per_torque and speed_torque_ratio were tested to capture the high-RPM
+    low-torque TWF failure sub-type (~9 persistent misses). Both were removed —
+    correlation with existing features (0.82–0.90) added noise and forced the
+    threshold down to 0.24, hurting precision without improving recall on the
+    genuinely uncatchable cases (proba 0.001–0.031, scoring below any threshold).
     """
     out = df.copy()
 
-    # 1. Remove random-failure rows — no signal to learn, only noise
+    # 1. Remove random-failure rows
     if 'RNF' in out.columns:
         n_before = len(out)
         out = out[out['RNF'] != 1].reset_index(drop=True)
         print(f"Dropped {n_before - len(out)} RNF rows ({n_before} → {len(out)})")
 
-    # 2. Rename raw sensor columns to bracket-free names
+    # 2. Rename raw sensor columns
     out = out.rename(columns=_RAW_RENAME)
 
-    # 3. Engineered features — built from the renamed raw columns
-    out['power_W']      = (out['torque_Nm'] * out['rot_speed_rpm']) / 9550
+    # 3. Engineered features
+    #    power_kW:     torque × RPM / 9550  (mechanical power in kilowatts)
+    #    temp_delta_K: proc_temp − air_temp  (cooling effectiveness)
+    #    torque_wear:  torque × tool_wear    (cumulative mechanical stress)
+    out['power_kW']     = (out['torque_Nm'] * out['rot_speed_rpm']) / 9550
     out['temp_delta_K'] = out['proc_temp_K'] - out['air_temp_K']
     out['torque_wear']  = out['torque_Nm'] * out['tool_wear_min']
 
-    # 4. Product type — ordinal encoding of quality variant
+    # 4. Product type — ordinal encoding (L=0, M=1, H=2)
     out['product_type'] = out['Type'].map({'L': 0, 'M': 1, 'H': 2})
 
-    # 5 & 6. Drop leakage columns, Type, and any leftover ID-style columns
-    out = out.drop(
-        columns=_FAILURE_MODE_COLS + ['Type'],
-        errors='ignore',
-    )
+    # 5 & 6. Drop leakage columns and Type
+    out = out.drop(columns=_FAILURE_MODE_COLS + ['Type'], errors='ignore')
 
     return out
 
@@ -76,8 +75,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 def get_feature_columns() -> list:
     """
     Definitive ordered list of feature columns produced by engineer_features.
-    Raw sensor features first (XGBoost tree splits benefit from all of them),
-    then the three engineered interaction/ratio features.
+    9 features: 5 raw sensors + 4 engineered.
     """
     return [
         # Raw sensors
@@ -87,7 +85,7 @@ def get_feature_columns() -> list:
         'torque_Nm',
         'tool_wear_min',
         # Engineered
-        'power_W',
+        'power_kW',
         'temp_delta_K',
         'torque_wear',
         'product_type',

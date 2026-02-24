@@ -18,7 +18,7 @@ def build_model(
     random_state: int = 42,
     **override_params,
 ) -> xgb.XGBClassifier:
-    """Build an XGBClassifier with sensible defaults.  Pass kwargs to override."""
+    """Build an XGBClassifier with sensible defaults. Pass kwargs to override."""
     params = dict(
         n_estimators=500,
         learning_rate=0.015,
@@ -47,59 +47,69 @@ def find_best_threshold(
     low: float = 0.1,
     high: float = 0.95,
     step: float = 0.01,
-    min_recall: float = 0.85,
+    recall_tol: float = 0.01,
 ) -> float:
     """
-    Sweep probability thresholds on a validation set and return the one
-    that maximises MCC **while maintaining at least `min_recall`**.
+    Select the threshold that maximises val MCC within the val recall plateau.
 
-    For predictive maintenance, missing a real failure (false negative) is
-    far more costly than a false alarm (false positive), so we enforce a
-    recall floor before optimising for overall quality (MCC).
+    Two-stage logic:
+      1. Find the peak val recall and collect every threshold within
+         `recall_tol` of it (the recall plateau).
+      2. Among those, return the one with the highest val MCC.
 
-    If no threshold meets the recall floor, the one with the highest recall
-    is selected instead.
+    This keeps recall at its best achievable level first, then maximises
+    precision/MCC within that constraint — rather than trading recall for
+    precision prematurely.
+
+    With ~50 failure cases in val, recall moves in discrete jumps of ~0.02
+    per missed case. recall_tol=0.01 is tight enough that only thresholds
+    which genuinely haven't dropped recall yet are included in the plateau.
+
+    Example (from observed data):
+        t=0.48  val_recall=0.94  val_MCC=0.901  <- plateau, MCC peak -> selected
+        t=0.50  val_recall=0.94  val_MCC=0.901  <- plateau
+        t=0.70  val_recall=0.92  val_MCC=0.899  <- recall dropped, excluded
+        t=0.83  val_recall=0.90  val_MCC=0.897  <- recall dropped, excluded
     """
     from sklearn.metrics import recall_score
 
     proba = model.predict_proba(X_val)[:, 1]
-    results: list[tuple[float, float, float]] = []  # (threshold, mcc, recall)
+    results = []
     for t in np.arange(low, high + step, step):
         y_pred = (proba >= t).astype(int)
         mcc = float(matthews_corrcoef(y_val, y_pred))
         rec = float(recall_score(y_val, y_pred, zero_division=0))
-        results.append((float(t), mcc, rec))
+        results.append((round(float(t), 2), mcc, rec))
 
-    # 1. Filter to thresholds that meet the recall floor
-    valid = [(t, mcc, rec) for t, mcc, rec in results if rec >= min_recall]
-    if valid:
-        # 2. Among those, pick highest MCC
-        best = max(valid, key=lambda x: x[1])
-    else:
-        # Fallback: maximise recall (shouldn't happen with min_recall=0.85)
-        best = max(results, key=lambda x: x[2])
+    peak_recall = max(rec for _, _, rec in results)
 
-    return round(float(best[0]), 2)
+    # Stage 1: thresholds where val recall hasn't dropped from its peak
+    recall_plateau = [(t, mcc, rec) for t, mcc, rec in results
+                      if rec >= peak_recall - recall_tol]
 
+    # Stage 2: best MCC among those
+    best = max(recall_plateau, key=lambda x: x[1])
+    return best[0]
 
-# ── Optuna hyper-parameter tuning ───────────────────────────────────────────
 
 def tune_model(
     X_train,
     y_train,
     scale_pos_weight: float,
     *,
-    n_trials: int = 75,
+    n_trials: int = 100,
     n_splits: int = 5,
     random_state: int = 42,
 ) -> dict:
     """
     Optimise XGBoost hyperparameters using Optuna TPE, maximising mean MCC
-    via stratified k-fold cross-validation (at the default 0.5 threshold).
+    via stratified k-fold cross-validation at the default 0.5 threshold.
 
-    Threshold selection is handled separately by find_best_threshold() on
-    the validation set after training, so hyperparameter tuning is stable
-    and doesn't oscillate between runs.
+    Threshold selection is handled separately by find_best_threshold() on the
+    validation set, so tuning is stable and doesn't oscillate between runs.
+
+    Note: Optuna CV uses a fixed n_estimators budget with no early stopping,
+    so search MCC will be lower than the final model's MCC — this is expected.
 
     Returns:
         {'best_params': dict, 'best_mcc': float, 'study': optuna.Study}
@@ -135,4 +145,3 @@ def tune_model(
         "best_mcc":    study.best_value,
         "study":       study,
     }
-
