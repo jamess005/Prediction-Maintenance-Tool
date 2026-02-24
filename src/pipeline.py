@@ -3,10 +3,8 @@ import joblib
 from sklearn.model_selection import train_test_split
 
 from features import engineer_features, get_feature_columns, get_target_column
-from models import build_model, get_class_weight, tune_model
-from evaluate import evaluate_model, plot_confusion_matrix
-
-THRESHOLD = 0.35  # probability cut-off: lower → more failures flagged, higher recall
+from models import build_model, get_class_weight, tune_model, find_best_threshold
+from evaluate import plot_confusion_matrix
 
 DATA_PATH  = '/home/james/ml-proj/predmain/data/ai4i2020.csv'
 MODEL_PATH = '/home/james/ml-proj/predmain/outputs/models/xgb_model.pkl'
@@ -15,70 +13,68 @@ CM_PATH    = '/home/james/ml-proj/predmain/outputs/figures/confusion_matrix.png'
 
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df = df.drop(columns=['UDI', 'Product ID', 'Type'], errors='ignore')
+    df = df.drop(columns=['UDI', 'Product ID'], errors='ignore')
     return df
 
 
 def run():
-    print("=== LOADING DATA ===")
+    # ── Data ────────────────────────────────────────────────────────────────
     df = load_data(DATA_PATH)
-    print(f"Loaded {len(df)} rows")
-
-    print("\n=== ENGINEERING FEATURES ===")
     df = engineer_features(df)
-    print("Features created:", get_feature_columns())
 
     X = df[get_feature_columns()]
     y = df[get_target_column()]
 
-    print("\n=== 70 / 15 / 15 SPLIT ===")
-    # Step 1: hold out 30% as val + test combined
+    # 70 / 15 / 15 split
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=0.3, stratify=y, random_state=42
     )
-    # Step 2: split the 30% equally → 15% val, 15% test
     X_val, X_test, y_val, y_test = train_test_split(
         X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
     )
-    print(f"Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
-
-    print("\n=== BUILDING MODEL ===")
     weight = get_class_weight(y_train)
 
-    print("\n=== HYPERPARAMETER TUNING (Optuna, 75 trials) ===")
+    print(f"Data:    {len(df)} rows, {len(get_feature_columns())} features")
+    print(f"Split:   train {len(X_train)} / val {len(X_val)} / test {len(X_test)}")
+    print(f"Weight:  {weight:.2f}  ({int((y_train==0).sum())} no-fail vs {int((y_train==1).sum())} fail)")
+
+    # ── Hyperparameter tuning ───────────────────────────────────────────────
+    print("\nTuning hyperparameters (75 Optuna trials, 5-fold stratified CV)...")
+    print("  Uses MCC at 0.5 threshold as the search metric — this keeps")
+    print("  hyperparameter comparison fair and deterministic between runs.")
+    print("  The deployment threshold is selected separately on the val set.\n")
     tune_results = tune_model(X_train, y_train, scale_pos_weight=weight, n_trials=75)
     best_params = tune_results["best_params"]
+    print(f"  Optuna search MCC: {tune_results['best_mcc']:.4f}")
 
-    print("\n=== CROSS VALIDATION (train set, tuned params) ===")
-    model_cv = build_model(scale_pos_weight=weight, **best_params)
-    evaluate_model(model_cv, X_train, y_train)
-
-    print("\n=== FINAL FIT (early stopping on val set) ===")
-    # Merge: early-stopping overrides take priority over Optuna's n_estimators
+    # ── Final fit with early stopping ───────────────────────────────────────
     final_params = {**best_params, 'n_estimators': 3000, 'early_stopping_rounds': 75}
-    model_final = build_model(scale_pos_weight=weight, **final_params)
-    model_final.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=False,
-    )
-    print(f"Early stopping: best iteration = {model_final.best_iteration} (of up to 3000 trees)")
+    model = build_model(scale_pos_weight=weight, **final_params)
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    print(f"\nFinal model: {model.best_iteration} trees (early stopped from 3000)")
 
-    print(f"\n=== VALIDATION SET EVALUATION (threshold={THRESHOLD}) ===")
-    val_metrics = plot_confusion_matrix(
-        model_final, X_val, y_val, threshold=THRESHOLD, show=False
-    )
-    print(f"Val   MCC: {val_metrics['mcc']:.3f}  F1: {val_metrics['f1']:.3f}")
+    # ── Find optimal threshold on validation set ────────────────────────────
+    threshold = find_best_threshold(model, X_val, y_val)
+    print(f"Threshold: {threshold}  (best MCC on val set with ≥85% recall)")
 
-    print(f"\n=== TEST SET EVALUATION (threshold={THRESHOLD}) ===")
-    plot_confusion_matrix(
-        model_final, X_test, y_test,
-        threshold=THRESHOLD, save_path=CM_PATH, show=False,
-    )
+    # ── Evaluate ────────────────────────────────────────────────────────────
+    val_m  = plot_confusion_matrix(model, X_val,  y_val,  threshold=threshold, show=False)
+    test_m = plot_confusion_matrix(model, X_test, y_test, threshold=threshold,
+                                   save_path=CM_PATH, show=False)
 
-    print("\n=== SAVING MODEL ===")
-    joblib.dump(model_final, MODEL_PATH)
-    print(f"Model saved to {MODEL_PATH}")
+    mean_mcc = (val_m['mcc'] + test_m['mcc']) / 2
+    mean_f1  = (val_m['f1']  + test_m['f1'])  / 2
+
+    print(f"\n{'Set':<6} {'MCC':>6} {'F1':>6} {'Recall':>7} {'Precision':>10}")
+    print(f"{'─'*38}")
+    print(f"{'Val':<6} {val_m['mcc']:>6.3f} {val_m['f1']:>6.3f} {val_m['recall']:>7.3f} {val_m['precision']:>10.3f}")
+    print(f"{'Test':<6} {test_m['mcc']:>6.3f} {test_m['f1']:>6.3f} {test_m['recall']:>7.3f} {test_m['precision']:>10.3f}")
+    print(f"{'─'*38}")
+    print(f"{'Mean':<6} {mean_mcc:>6.3f} {mean_f1:>6.3f}")
+
+    # ── Save ────────────────────────────────────────────────────────────────
+    joblib.dump({'model': model, 'threshold': threshold}, MODEL_PATH)
+    print(f"\nSaved model + threshold → {MODEL_PATH}")
 
 
 if __name__ == '__main__':

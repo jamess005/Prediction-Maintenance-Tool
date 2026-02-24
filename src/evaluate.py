@@ -9,76 +9,39 @@ Used by:
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import (
     matthews_corrcoef,
     f1_score,
-    make_scorer,
+    recall_score,
+    precision_score,
     confusion_matrix,
     classification_report,
 )
 
-
-# ── Cross-validated evaluation ──────────────────────────────────────────────
-
-def evaluate_model(
-    model,
-    X_train,
-    y_train,
-    *,
-    n_splits: int = 5,
-    random_state: int = 42,
-) -> dict:
-    """
-    Run stratified k-fold CV and print MCC / F1.
-
-    Returns a dict with arrays of per-fold scores plus means:
-        {'mcc': array, 'f1': array, 'mcc_mean': float, 'f1_mean': float}
-    """
-    skf = StratifiedKFold(
-        n_splits=n_splits, shuffle=True, random_state=random_state
-    )
-    mcc_scorer = make_scorer(matthews_corrcoef)
-
-    mcc_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring=mcc_scorer)
-    f1_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring="f1")
-
-    print(f"MCC  (mean ± std): {mcc_scores.mean():.3f} ± {mcc_scores.std():.3f}")
-    print(f"F1   (mean ± std): {f1_scores.mean():.3f} ± {f1_scores.std():.3f}")
-
-    return {
-        "mcc": mcc_scores,
-        "f1": f1_scores,
-        "mcc_mean": mcc_scores.mean(),
-        "f1_mean": f1_scores.mean(),
-    }
-
-
-# ── Confusion matrix ────────────────────────────────────────────────────────
 
 def plot_confusion_matrix(
     model,
     X_test,
     y_test,
     *,
-    threshold: float = 0.35,
+    threshold: float,
     save_path: str | None = None,
     show: bool = True,
 ) -> dict:
     """
     Plot an annotated confusion matrix and return scalar metrics.
 
-    threshold: probability cut-off for predicting Failure (default 0.35).
-               Lowering below 0.5 increases recall at the cost of precision.
-
     Returns:
-        {'mcc': float, 'f1': float, 'cm': ndarray, 'report': str}
+        {'mcc': float, 'f1': float, 'recall': float, 'precision': float,
+         'cm': ndarray, 'report': str}
     """
     proba = model.predict_proba(X_test)[:, 1]
     y_pred = (proba >= threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred)
     mcc = matthews_corrcoef(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, zero_division=0)
     report = classification_report(
         y_test, y_pred, target_names=["No Failure", "Failure"]
     )
@@ -94,10 +57,6 @@ def plot_confusion_matrix(
         yticklabels=["Actual: No Failure", "Actual: Failure"],
     )
     ax.set_title(f"Confusion Matrix — MCC: {mcc:.3f}  F1: {f1:.3f}  (threshold={threshold})")
-    ax.set_xlabel(
-        "Top-right = false alarms (unnecessary inspections)\n"
-        "Bottom-left = missed failures (dangerous)"
-    )
     plt.tight_layout()
 
     if save_path:
@@ -111,5 +70,5 @@ def plot_confusion_matrix(
     else:
         plt.close(fig)
 
-    print(report)
-    return {"mcc": mcc, "f1": f1, "cm": cm, "report": report}
+    return {"mcc": mcc, "f1": f1, "recall": rec, "precision": prec,
+            "cm": cm, "report": report}
