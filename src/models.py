@@ -47,49 +47,54 @@ def find_best_threshold(
     low: float = 0.1,
     high: float = 0.95,
     step: float = 0.01,
-    recall_tol: float = 0.01,
+    min_recall: float = 0.80,
 ) -> float:
     """
-    Select the threshold that maximises val MCC within the val recall plateau.
+    Select the deployment threshold at the END of the val MCC plateau.
 
-    Two-stage logic:
-      1. Find the peak val recall and collect every threshold within
-         `recall_tol` of it (the recall plateau).
-      2. Among those, return the one with the highest val MCC.
+    Strategy
+    --------
+    The MCC curve forms a hump: it rises as the threshold increases above
+    the noise floor, peaks, then falls when recall starts to drop.  The hump
+    is flat (same MCC) across a band of thresholds where recall hasn't
+    changed yet.
 
-    This keeps recall at its best achievable level first, then maximises
-    precision/MCC within that constraint — rather than trading recall for
-    precision prematurely.
+    1. Sweep thresholds; keep only those where recall >= min_recall.
+    2. Find the peak val MCC and note the recall at that point.
+    3. Collect all thresholds that still hold that same recall level
+       (i.e. the full flat top of the hump before recall first drops).
+    4. Return the HIGHEST threshold in that band.
 
-    With ~50 failure cases in val, recall moves in discrete jumps of ~0.02
-    per missed case. recall_tol=0.01 is tight enough that only thresholds
-    which genuinely haven't dropped recall yet are included in the plateau.
-
-    Example (from observed data):
-        t=0.48  val_recall=0.94  val_MCC=0.901  <- plateau, MCC peak -> selected
-        t=0.50  val_recall=0.94  val_MCC=0.901  <- plateau
-        t=0.70  val_recall=0.92  val_MCC=0.899  <- recall dropped, excluded
-        t=0.83  val_recall=0.90  val_MCC=0.897  <- recall dropped, excluded
+    Picking the end of the plateau (rather than the start) gives a more
+    conservative, higher-precision threshold that generalises better to
+    unseen data — without sacrificing any val recall or val MCC.
     """
     from sklearn.metrics import recall_score
 
     proba = model.predict_proba(X_val)[:, 1]
-    results = []
+    results: list[tuple[float, float, float]] = []
     for t in np.arange(low, high + step, step):
         y_pred = (proba >= t).astype(int)
         mcc = float(matthews_corrcoef(y_val, y_pred))
         rec = float(recall_score(y_val, y_pred, zero_division=0))
         results.append((round(float(t), 2), mcc, rec))
 
-    peak_recall = max(rec for _, _, rec in results)
+    # Keep thresholds that meet the recall floor
+    valid = [(t, mcc, rec) for t, mcc, rec in results if rec >= min_recall]
+    if not valid:
+        return max(results, key=lambda x: x[2])[0]   # fallback: best recall
 
-    # Stage 1: thresholds where val recall hasn't dropped from its peak
-    recall_plateau = [(t, mcc, rec) for t, mcc, rec in results
-                      if rec >= peak_recall - recall_tol]
+    # Find peak MCC and the recall level at which it occurs
+    peak_entry = max(valid, key=lambda x: x[1])
+    peak_mcc   = peak_entry[1]
+    peak_rec   = peak_entry[2]   # recall level that goes with the MCC peak
 
-    # Stage 2: best MCC among those
-    best = max(recall_plateau, key=lambda x: x[1])
-    return best[0]
+    # Plateau = all valid thresholds that still hold that recall level
+    # (MCC is flat here; once recall drops, MCC drops too)
+    plateau = [(t, mcc, rec) for t, mcc, rec in valid if rec >= peak_rec]
+
+    # Return the HIGHEST threshold on the plateau (end of the hump)
+    return max(plateau, key=lambda x: x[0])[0]
 
 
 def tune_model(

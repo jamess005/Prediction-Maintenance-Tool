@@ -61,7 +61,7 @@ def run():
     # Recall floor is 0.90 — missing a failure (false negative) is far more
     # costly than a false alarm in predictive maintenance.
     threshold = find_best_threshold(model, X_val, y_val)
-    print(f"Threshold: {threshold}  (best MCC on val with >=90% recall)")
+    print(f"Threshold: {threshold}  (best MCC on val set with ≥80% recall floor)")
 
     # ── Evaluate ────────────────────────────────────────────────────────────
     val_m  = plot_confusion_matrix(model, X_val,  y_val,  threshold=threshold, show=False)
