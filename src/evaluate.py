@@ -6,6 +6,8 @@ Used by:
   - notebooks/    (interactive analysis)
 """
 
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -25,7 +27,7 @@ def plot_confusion_matrix(
     y_test,
     *,
     threshold: float,
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     show: bool = True,
 ) -> dict:
     """

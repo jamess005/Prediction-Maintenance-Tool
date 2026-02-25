@@ -3,6 +3,8 @@ import pandas as pd
 import joblib
 from sklearn.model_selection import train_test_split
 
+from pathlib import Path
+
 from features import engineer_features, get_feature_columns, get_target_column
 from models import (
     build_model, build_rf_model,
@@ -12,13 +14,14 @@ from models import (
 )
 from evaluate import plot_confusion_matrix
 
-DATA_PATH      = '/home/james/ml-proj/predmain/data/ai4i2020.csv'
-XGB_MODEL_PATH = '/home/james/ml-proj/predmain/outputs/models/xgb_model.pkl'
-RF_MODEL_PATH  = '/home/james/ml-proj/predmain/outputs/models/rf_model.pkl'
-CM_PATH        = '/home/james/ml-proj/predmain/outputs/figures/confusion_matrix.png'
+ROOT           = Path(__file__).resolve().parent.parent
+DATA_PATH      = ROOT / 'data' / 'ai4i2020.csv'
+XGB_MODEL_PATH = ROOT / 'outputs' / 'models' / 'xgb_model.pkl'
+RF_MODEL_PATH  = ROOT / 'outputs' / 'models' / 'rf_model.pkl'
+CM_PATH        = ROOT / 'outputs' / 'figures' / 'confusion_matrix.png'
 
 
-def load_data(path: str) -> pd.DataFrame:
+def load_data(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.drop(columns=['UDI', 'Product ID'], errors='ignore')
     return df
@@ -62,9 +65,7 @@ def run(model_type: str = 'xgb') -> None:
     print(f"Split:   train {len(X_train)} / val {len(X_val)} / test {len(X_test)}")
 
     # ── Hyperparameter tuning ───────────────────────────────────────────────
-    print(f"\nTuning hyperparameters (100 Optuna trials, 5-fold stratified CV)...")
-    print("  Optimises MCC at 0.5 threshold — fair, deterministic comparison across trials.")
-    print("  Deployment threshold is selected separately on val set.\n")
+    print(f"\nTuning hyperparameters (100 Optuna trials, 5-fold stratified CV)...\n")
 
     if model_type == 'xgb':
         weight = get_class_weight(y_train)

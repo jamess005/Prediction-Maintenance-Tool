@@ -52,30 +52,16 @@ def find_best_threshold(
     mcc_tolerance: float = 0.01,
 ) -> float:
     """
-    Select deployment threshold using the recall-biased near-plateau method.
+    Select deployment threshold via the recall-biased near-plateau method.
 
-    Strategy
-    --------
-    1. Sweep thresholds; keep only those where recall >= min_recall.
-    2. Find the peak val MCC.
-    3. Collect all thresholds within *mcc_tolerance* of the peak
-       (the near-plateau around the maximum).
-    4. Return the **lowest** threshold in that band.
+    1. Sweep thresholds; keep only those where recall >= *min_recall*.
+    2. Find the peak val MCC among those thresholds.
+    3. Collect all thresholds within *mcc_tolerance* of the peak.
+    4. Return the **lowest** threshold in that band (maximises recall).
 
-    Why this works
-    --------------
-    The MCC curve is relatively flat near its peak — thresholds within a
-    small tolerance achieve essentially the same val MCC.  Picking the
-    lowest threshold in that band maximises recall, which:
-      • generalises better (val-optimal threshold often overshoots on test),
-      • is appropriate for predictive maintenance where missing a failure
-        is costlier than a false alarm.
-
-    The previous plateau-end strategy always picked the highest threshold
-    that held peak recall, which worked for XGBoost (sharp MCC peak) but
-    overshot for Random Forest (broad MCC hump).  This near-plateau
-    approach adapts to both — it picks near the "start of the hump"
-    (best recall) while staying within the high-MCC zone.
+    Picking the recall-biased end of the near-plateau generalises better
+    than the peak-threshold alone, especially for Random Forests whose
+    MCC curve is broader than XGBoost's.
     """
     from sklearn.metrics import recall_score
 
@@ -113,17 +99,9 @@ def tune_model(
     random_state: int = 42,
 ) -> dict:
     """
-    Optimise XGBoost hyperparameters using Optuna TPE, maximising mean MCC
-    via stratified k-fold cross-validation at the default 0.5 threshold.
+    Optimise XGBoost hyperparameters with Optuna TPE.
 
-    Threshold selection is handled separately by find_best_threshold() on the
-    validation set, so tuning is stable and doesn't oscillate between runs.
-
-    Note: Optuna CV uses a fixed n_estimators budget with no early stopping,
-    so search MCC will be lower than the final model's MCC — this is expected.
-
-    Returns:
-        {'best_params': dict, 'best_mcc': float, 'study': optuna.Study}
+    Returns {'best_params': dict, 'best_mcc': float, 'study': Study}.
     """
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     mcc_scorer = make_scorer(matthews_corrcoef)
@@ -190,14 +168,9 @@ def tune_rf_model(
     random_state: int = 42,
 ) -> dict:
     """
-    Optimise RandomForest hyperparameters using Optuna TPE, maximising mean
-    MCC via stratified k-fold cross-validation at the default 0.5 threshold.
+    Optimise Random Forest hyperparameters with Optuna TPE.
 
-    Uses class_weight='balanced' throughout — sklearn's built-in mechanism
-    for handling imbalanced classes (equivalent to scale_pos_weight for XGB).
-
-    Returns:
-        {'best_params': dict, 'best_mcc': float, 'study': optuna.Study}
+    Returns {'best_params': dict, 'best_mcc': float, 'study': Study}.
     """
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     mcc_scorer = make_scorer(matthews_corrcoef)

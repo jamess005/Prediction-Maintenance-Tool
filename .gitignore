@@ -3,10 +3,10 @@
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb_checkpoints
 
-# Data
+# Data (too large for git)
 data/
+.csv
 
 # Model outputs and figures
 outputs/
@@ -15,23 +15,19 @@ outputs/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.Python
 
 # OS
 .DS_Store
 Thumbs.db
 
-# VS Code
+# IDE
 .vscode/
 
-#.env
+# Environment
 .env
+
+# Docker
+*.tar
 
 # Logs
 *.log
-logs/
-
-# Temporary files
-*.tmp
-.cache/
