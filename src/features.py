@@ -43,6 +43,12 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     correlation with existing features (0.82–0.90) added noise and forced the
     threshold down to 0.24, hurting precision without improving recall on the
     genuinely uncatchable cases (proba 0.001–0.031, scoring below any threshold).
+
+    high_wear_flag and wear_torque_zone (binary TWF domain-knowledge flags)
+    were also tested — they hard-encode the known failure condition
+    (tool wear > 190 min, torque < 35 Nm).  They had no measurable impact on
+    XGBoost MCC (0.878 vs 0.880 baseline) because the model already discovers
+    the same thresholds via tree splits.  Removed to keep the feature set lean.
     """
     out = df.copy()
 

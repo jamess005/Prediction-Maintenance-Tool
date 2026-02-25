@@ -1,5 +1,6 @@
 import numpy as np
 import xgboost as xgb
+from sklearn.ensemble import RandomForestClassifier
 import optuna
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import make_scorer, matthews_corrcoef
@@ -48,26 +49,33 @@ def find_best_threshold(
     high: float = 0.95,
     step: float = 0.01,
     min_recall: float = 0.80,
+    mcc_tolerance: float = 0.01,
 ) -> float:
     """
-    Select the deployment threshold at the END of the val MCC plateau.
+    Select deployment threshold using the recall-biased near-plateau method.
 
     Strategy
     --------
-    The MCC curve forms a hump: it rises as the threshold increases above
-    the noise floor, peaks, then falls when recall starts to drop.  The hump
-    is flat (same MCC) across a band of thresholds where recall hasn't
-    changed yet.
-
     1. Sweep thresholds; keep only those where recall >= min_recall.
-    2. Find the peak val MCC and note the recall at that point.
-    3. Collect all thresholds that still hold that same recall level
-       (i.e. the full flat top of the hump before recall first drops).
-    4. Return the HIGHEST threshold in that band.
+    2. Find the peak val MCC.
+    3. Collect all thresholds within *mcc_tolerance* of the peak
+       (the near-plateau around the maximum).
+    4. Return the **lowest** threshold in that band.
 
-    Picking the end of the plateau (rather than the start) gives a more
-    conservative, higher-precision threshold that generalises better to
-    unseen data — without sacrificing any val recall or val MCC.
+    Why this works
+    --------------
+    The MCC curve is relatively flat near its peak — thresholds within a
+    small tolerance achieve essentially the same val MCC.  Picking the
+    lowest threshold in that band maximises recall, which:
+      • generalises better (val-optimal threshold often overshoots on test),
+      • is appropriate for predictive maintenance where missing a failure
+        is costlier than a false alarm.
+
+    The previous plateau-end strategy always picked the highest threshold
+    that held peak recall, which worked for XGBoost (sharp MCC peak) but
+    overshot for Random Forest (broad MCC hump).  This near-plateau
+    approach adapts to both — it picks near the "start of the hump"
+    (best recall) while staying within the high-MCC zone.
     """
     from sklearn.metrics import recall_score
 
@@ -84,17 +92,15 @@ def find_best_threshold(
     if not valid:
         return max(results, key=lambda x: x[2])[0]   # fallback: best recall
 
-    # Find peak MCC and the recall level at which it occurs
-    peak_entry = max(valid, key=lambda x: x[1])
-    peak_mcc   = peak_entry[1]
-    peak_rec   = peak_entry[2]   # recall level that goes with the MCC peak
+    # Peak MCC among valid thresholds
+    peak_mcc = max(valid, key=lambda x: x[1])[1]
 
-    # Plateau = all valid thresholds that still hold that recall level
-    # (MCC is flat here; once recall drops, MCC drops too)
-    plateau = [(t, mcc, rec) for t, mcc, rec in valid if rec >= peak_rec]
+    # Near-plateau: all thresholds within tolerance of the peak
+    near_peak = [(t, mcc, rec) for t, mcc, rec in valid
+                 if mcc >= peak_mcc - mcc_tolerance]
 
-    # Return the HIGHEST threshold on the plateau (end of the hump)
-    return max(plateau, key=lambda x: x[0])[0]
+    # Return the LOWEST threshold in the near-plateau (maximises recall)
+    return min(near_peak, key=lambda x: x[0])[0]
 
 
 def tune_model(
@@ -135,6 +141,76 @@ def tune_model(
             "reg_lambda":        trial.suggest_float("reg_lambda",        1e-8, 10.0, log=True),
         }
         model = build_model(scale_pos_weight=scale_pos_weight, **params)
+        return cross_val_score(
+            model, X_train, y_train, cv=skf, scoring=mcc_scorer
+        ).mean()
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=random_state),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    return {
+        "best_params": study.best_params,
+        "best_mcc":    study.best_value,
+        "study":       study,
+    }
+
+
+# ── Random Forest ────────────────────────────────────────────────────────────
+
+
+def build_rf_model(
+    class_weight: str | dict = "balanced",
+    random_state: int = 42,
+    **override_params,
+) -> RandomForestClassifier:
+    """Build a RandomForestClassifier with sensible defaults."""
+    params = dict(
+        n_estimators=500,
+        max_depth=15,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight=class_weight,
+        n_jobs=-1,
+        random_state=random_state,
+    )
+    params.update(override_params)
+    return RandomForestClassifier(**params)  # type: ignore[arg-type]
+
+
+def tune_rf_model(
+    X_train,
+    y_train,
+    *,
+    n_trials: int = 100,
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> dict:
+    """
+    Optimise RandomForest hyperparameters using Optuna TPE, maximising mean
+    MCC via stratified k-fold cross-validation at the default 0.5 threshold.
+
+    Uses class_weight='balanced' throughout — sklearn's built-in mechanism
+    for handling imbalanced classes (equivalent to scale_pos_weight for XGB).
+
+    Returns:
+        {'best_params': dict, 'best_mcc': float, 'study': optuna.Study}
+    """
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    mcc_scorer = make_scorer(matthews_corrcoef)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "n_estimators":     trial.suggest_int("n_estimators",     200, 1000),
+            "max_depth":        trial.suggest_int("max_depth",        3, 30),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+            "min_samples_leaf":  trial.suggest_int("min_samples_leaf",  1, 20),
+            "max_features":     trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+        }
+        model = build_rf_model(class_weight="balanced", **params)
         return cross_val_score(
             model, X_train, y_train, cv=skf, scoring=mcc_scorer
         ).mean()
